@@ -378,6 +378,19 @@ typedef struct pagesize_count_s{
   int   count;
 }pagesize_count_t;
 
+typedef struct service_resolver_s
+{
+  AvahiClient* client;
+  AvahiIfIndex interface;
+  AvahiProtocol protocol;
+  const char* name;
+  const char* type;
+  const char* domain;
+  void* userdata;  
+}service_resolver_t;
+
+pthread_rwlock_t lock = PTHREAD_RWLOCK_INITIALIZER;
+pthread_rwlock_t loglock = PTHREAD_RWLOCK_INITIALIZER;
 
 cups_array_t *remote_printers;
 static char *alt_config_file = NULL;
@@ -696,6 +709,7 @@ stop_debug_logging()
 
 void
 debug_printf(const char *format, ...) {
+  pthread_rwlock_wrlock(&loglock);
   if (debug_stderr || debug_logfile) {
     time_t curtime = time(NULL);
     char buf[64];
@@ -717,6 +731,7 @@ debug_printf(const char *format, ...) {
       va_end(arglist);
     }
   }
+  pthread_rwlock_unlock(&loglock);
 }
 
 void
@@ -4835,7 +4850,6 @@ create_subscription ()
 		  cupsLastErrorString ());
     return 0;
   }
-
   attr = ippFindAttribute (resp, "notify-subscription-id", IPP_TAG_INTEGER);
   if (attr)
     id = ippGetInteger (attr, 0);
@@ -7460,8 +7474,11 @@ remove_printer_entry(remote_printer_t *p) {
     p->status = STATUS_DISAPPEARED;
   p->timeout = time(NULL) + TIMEOUT_REMOVE;
 }
-
+static int update_count = 0;
 gboolean update_cups_queues(gpointer unused) {
+  pthread_rwlock_wrlock(&lock);
+  update_count++;
+  
   remote_printer_t *p, *q, *r, *s, *master;
   http_t        *http;
   char          uri[HTTP_MAX_URI], device_uri[HTTP_MAX_URI], buf[1024],
@@ -8740,6 +8757,7 @@ gboolean update_cups_queues(gpointer unused) {
 
     }
   }
+  pthread_rwlock_unlock(&lock);
 
   /* If we have printer entries which we did not treat yet because of
      update_cups_queues_max_per_call we push their timeouts by the
@@ -9800,6 +9818,7 @@ static void resolve_callback(AvahiServiceResolver *r,
 			     AvahiStringList *txt,
 			     AvahiLookupResultFlags flags,
 			     AVAHI_GCC_UNUSED void* userdata) {
+  pthread_rwlock_wrlock(&lock);
   char ifname[IF_NAMESIZE];
   AvahiStringList *uuid_entry, *printer_type_entry;
   char *uuid_key, *uuid_value;
@@ -10053,6 +10072,31 @@ static void resolve_callback(AvahiServiceResolver *r,
 
   if (in_shutdown == 0)
     recheck_timer ();
+
+  pthread_rwlock_unlock(&lock);  
+}
+
+
+void* service_wrapper(void* arg){
+  debug_printf("service_wrapper() in THREAD %ld\n", pthread_self());
+  
+  /* dereferencing obtained voidf pointer */  
+  service_resolver_t* a = (service_resolver_t*)malloc(sizeof(service_resolver_t*));
+  a = (service_resolver_t*)arg;
+
+
+  // pthread_rwlock_wrlock(&lock);
+  if(a->client) debug_printf("Client %d %d %s %s %s\n",a->interface, a->protocol, a->name, a->type, a->domain);
+  
+  if (!(avahi_service_resolver_new(a->client, a->interface, a->protocol, a->name, a->type, a->domain, AVAHI_PROTO_UNSPEC, 0, resolve_callback, a->userdata))){
+      debug_printf("Failed to resolve service '%s' %s %s: %s\n",
+       a->name, a->type, a->domain, avahi_strerror(avahi_client_errno(a->client)));
+  }
+  else debug_printf("Resolve successful %s %s %s in THREAD %ld\n", a->name, a->type, a->domain, pthread_self());
+  // pthread_rwlock_unlock(&lock);
+
+  // sleep(40);
+  debug_printf("exiting service_wrapper() in THREAD %ld\n", pthread_self());
 }
 
 static void browse_callback(AvahiServiceBrowser *b,
@@ -10064,7 +10108,6 @@ static void browse_callback(AvahiServiceBrowser *b,
 			    const char *domain,
 			    AvahiLookupResultFlags flags,
 			    void* userdata) {
-
   AvahiClient *c = userdata;
   char ifname[IF_NAMESIZE];
 
@@ -10115,11 +10158,38 @@ static void browse_callback(AvahiServiceBrowser *b,
        function we free it. If the server is terminated before
        the callback function is called the server will free
        the resolver for us. */
+    
 
-    if (!(avahi_service_resolver_new(c, interface, protocol, name, type, domain, AVAHI_PROTO_UNSPEC, 0, resolve_callback, c)))
-      debug_printf("Failed to resolve service '%s': %s\n",
-		   name, avahi_strerror(avahi_client_errno(c)));
+    /*  Copying name, type, domain in our own dynamically allocated test_name, test_type and test_domain 
+        This is done to prevent seg faults. */ 
+    const char* test_name = (char*)malloc(sizeof(char)*(strlen(name)+1));
+    const char* test_type = (char*)malloc(sizeof(char)*(strlen(type)+1));
+    const char* test_domain = (char*)malloc(sizeof(char)*(strlen(domain)+1));
+    strcpy(test_name, name);
+    strcpy(test_type, type);
+    strcpy(test_domain, domain);
+    
+
+    /* structure for arguments to be passed in pthread_create */
+    struct service_resolver_s* arg = (struct service_resolver_s*)malloc(sizeof(service_resolver_t));
+    
+    arg->client = c;
+    arg->interface = interface;
+    arg->protocol = protocol;
+    arg->name = test_name;
+    arg->type = test_type;
+    arg->domain = test_domain;
+    arg->userdata = c;
+    
+    pthread_t id;
+    
+    pthread_create(&id, NULL, (void*)service_wrapper, (void*)arg);
+    // pthread_detach(id);
     break;
+    // if (!(avahi_service_resolver_new(c, interface, protocol, name, type, domain, AVAHI_PROTO_UNSPEC, 0, resolve_callback, c)))
+    //   debug_printf("Failed to resolve service '%s': %s\n",
+		  //  name, avahi_strerror(avahi_client_errno(c)));
+    // break;
 
   /* A service (remote printer) has disappeared */
   case AVAHI_BROWSER_REMOVE: {
@@ -11943,6 +12013,8 @@ find_previous_queue (gpointer key,
 }
 
 int main(int argc, char*argv[]) {
+  struct timespec start, end;
+  clock_gettime(CLOCK_REALTIME, &start);
   int ret = 1;
   http_t *http;
   int i;
@@ -12527,6 +12599,13 @@ fail:
     free(DefaultOptions);
   if (DomainSocket != NULL)
     free(DomainSocket);
+
+  clock_gettime(CLOCK_REALTIME, &end);
+  double time_taken; 
+  time_taken = (end.tv_sec - start.tv_sec) * 1e9; 
+  time_taken = (time_taken + (end.tv_nsec - start.tv_nsec)) * 1e-9;
+  fprintf(stderr, "TOTAL TIME: %lf\n", time_taken);
+  fprintf(stderr, "update_cups_queues calls: %d\n",update_count);
 
   return ret;
 
