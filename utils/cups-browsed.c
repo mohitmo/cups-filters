@@ -389,9 +389,9 @@ typedef struct service_resolver_s
   void* userdata;  
 }service_resolver_t;
 
-pthread_rwlock_t lock = PTHREAD_RWLOCK_INITIALIZER;
-pthread_rwlock_t loglock = PTHREAD_RWLOCK_INITIALIZER;
 
+  pthread_rwlock_t *lock;
+pthread_rwlock_t *loglock;
 cups_array_t *remote_printers;
 static char *alt_config_file = NULL;
 static cups_array_t *command_line_config;
@@ -709,7 +709,7 @@ stop_debug_logging()
 
 void
 debug_printf(const char *format, ...) {
-  pthread_rwlock_wrlock(&loglock);
+  // pthread_rwlock_wrlock(loglock);
   if (debug_stderr || debug_logfile) {
     time_t curtime = time(NULL);
     char buf[64];
@@ -731,7 +731,7 @@ debug_printf(const char *format, ...) {
       va_end(arglist);
     }
   }
-  pthread_rwlock_unlock(&loglock);
+  // pthread_rwlock_unlock(loglock);
 }
 
 void
@@ -7476,7 +7476,7 @@ remove_printer_entry(remote_printer_t *p) {
 }
 static int update_count = 0;
 gboolean update_cups_queues(gpointer unused) {
-  pthread_rwlock_wrlock(&lock);
+  pthread_rwlock_wrlock(lock);
   update_count++;
   
   remote_printer_t *p, *q, *r, *s, *master;
@@ -8757,7 +8757,7 @@ gboolean update_cups_queues(gpointer unused) {
 
     }
   }
-  pthread_rwlock_unlock(&lock);
+  pthread_rwlock_unlock(lock);
 
   /* If we have printer entries which we did not treat yet because of
      update_cups_queues_max_per_call we push their timeouts by the
@@ -9818,7 +9818,7 @@ static void resolve_callback(AvahiServiceResolver *r,
 			     AvahiStringList *txt,
 			     AvahiLookupResultFlags flags,
 			     AVAHI_GCC_UNUSED void* userdata) {
-  pthread_rwlock_wrlock(&lock);
+  pthread_rwlock_wrlock(lock);
   char ifname[IF_NAMESIZE];
   AvahiStringList *uuid_entry, *printer_type_entry;
   char *uuid_key, *uuid_value;
@@ -10073,7 +10073,7 @@ static void resolve_callback(AvahiServiceResolver *r,
   if (in_shutdown == 0)
     recheck_timer ();
 
-  pthread_rwlock_unlock(&lock);  
+  pthread_rwlock_unlock(lock);  
 }
 
 
@@ -10096,6 +10096,8 @@ void* service_wrapper(void* arg){
   // pthread_rwlock_unlock(&lock);
 
   // sleep(40);
+  free(arg);
+
   debug_printf("exiting service_wrapper() in THREAD %ld\n", pthread_self());
 }
 
@@ -12035,6 +12037,20 @@ int main(int argc, char*argv[]) {
 
   /* Initialise the clusters array */
   clusters = cupsArrayNew(NULL, NULL);
+  lock = (pthread_rwlock_t*)malloc(sizeof(pthread_rwlock_t));
+  // fprintf(stderr, "YAHA TAK\n");
+  if(pthread_rwlock_init(lock, NULL)!=0){
+    fprintf(stderr, "LOCK NOT SET\n");
+  }
+  else fprintf(stderr, "LOcK SET\n");
+
+
+
+
+  // pthread_rwlock_init(loglock, NULL);
+  //   fprintf(stderr, "LOCK NOT SET\n");
+  // }
+  // else fprintf(stderr, "LOcK SET\n");
 
   /* Read command line options */
   if (argc >= 2) {
