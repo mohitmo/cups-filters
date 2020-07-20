@@ -12038,7 +12038,6 @@ int main(int argc, char*argv[]) {
   /* Initialise the clusters array */
   clusters = cupsArrayNew(NULL, NULL);
   lock = (pthread_rwlock_t*)malloc(sizeof(pthread_rwlock_t));
-  // fprintf(stderr, "YAHA TAK\n");
   if(pthread_rwlock_init(lock, NULL)!=0){
     fprintf(stderr, "LOCK NOT SET\n");
   }
