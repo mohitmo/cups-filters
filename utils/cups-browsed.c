@@ -378,6 +378,21 @@ typedef struct pagesize_count_s{
   int   count;
 }pagesize_count_t;
 
+typedef struct resolver_args_s{
+  AvahiServiceResolver *r;
+  AvahiIfIndex interface;
+  AvahiProtocol protocol;
+  AvahiResolverEvent event;
+  const char *name;
+  const char *type;
+  const char *domain;
+  const char *host_name;
+  const AvahiAddress *address;
+  uint16_t port;
+  AvahiStringList *txt;
+  AvahiLookupResultFlags flags;
+  void* userdata;
+}resolver_args_t;
 
 cups_array_t *remote_printers;
 static char *alt_config_file = NULL;
@@ -510,6 +525,11 @@ static char* ppd_keywords[] =
 
 /* Static global variable for indicating we have reached the HTTP timeout */
 static int timeout_reached = 0;
+
+/* read-write locks */
+pthread_rwlock_t lock = PTHREAD_RWLOCK_INITIALIZER;
+pthread_rwlock_t loglock = PTHREAD_RWLOCK_INITIALIZER;
+
 
 static void recheck_timer (void);
 static void browse_poll_create_subscription (browsepoll_t *context,
@@ -696,6 +716,7 @@ stop_debug_logging()
 
 void
 debug_printf(const char *format, ...) {
+  pthread_rwlock_wrlock(&loglock);
   if (debug_stderr || debug_logfile) {
     time_t curtime = time(NULL);
     char buf[64];
@@ -717,6 +738,7 @@ debug_printf(const char *format, ...) {
       va_end(arglist);
     }
   }
+  pthread_rwlock_unlock(&loglock);
 }
 
 void
@@ -7462,6 +7484,7 @@ remove_printer_entry(remote_printer_t *p) {
 }
 
 gboolean update_cups_queues(gpointer unused) {
+  pthread_rwlock_wrlock(&lock);
   remote_printer_t *p, *q, *r, *s, *master;
   http_t        *http;
   char          uri[HTTP_MAX_URI], device_uri[HTTP_MAX_URI], buf[1024],
@@ -8755,6 +8778,7 @@ gboolean update_cups_queues(gpointer unused) {
       if (p->timeout <= current_time + pause_between_cups_queue_updates)
 	p->timeout = current_time + pause_between_cups_queue_updates;
 
+  pthread_rwlock_unlock(&lock);
  cannot_create:
   if (p && !in_shutdown)
     remove_printer_entry(p);
@@ -9787,24 +9811,31 @@ allowed (struct sockaddr *srcaddr)
 }
 
 #ifdef HAVE_AVAHI
-static void resolve_callback(AvahiServiceResolver *r,
-			     AvahiIfIndex interface,
-			     AvahiProtocol protocol,
-			     AvahiResolverEvent event,
-			     const char *name,
-			     const char *type,
-			     const char *domain,
-			     const char *host_name,
-			     const AvahiAddress *address,
-			     uint16_t port,
-			     AvahiStringList *txt,
-			     AvahiLookupResultFlags flags,
-			     AVAHI_GCC_UNUSED void* userdata) {
+static void resolve_callback(void* arg) {
+  resolver_args_t* a = (resolver_args_t*)arg;
+
+  AvahiServiceResolver *r = a->r;
+  AvahiIfIndex interface = a->interface;
+  AvahiProtocol protocol = a->protocol;
+  AvahiResolverEvent event = a->event;
+  const char *name = a->name;
+  const char *type = a->type;
+  const char *domain = a->domain;
+  const char *host_name = a->host_name;
+  const AvahiAddress *address = a->address;
+  uint16_t port = a->port;
+  AvahiStringList *txt = a->txt;
+  AvahiLookupResultFlags flags = a->flags;
+  AVAHI_GCC_UNUSED void* userdata = a->userdata;
+
+  
+
   char ifname[IF_NAMESIZE];
   AvahiStringList *uuid_entry, *printer_type_entry;
   char *uuid_key, *uuid_value;
 
   debug_printf("resolve_callback() in THREAD %ld\n", pthread_self());
+  // debug_printf("args received: %s %s %s %s\n", name, type, domain, host_name);
 
   if (r == NULL || name == NULL || type == NULL || domain == NULL)
     return;
@@ -9818,10 +9849,17 @@ static void resolve_callback(AvahiServiceResolver *r,
 
   /* Ignore local queues of the cupsd we are serving for, identifying them
      via UUID */
+  
+  pthread_rwlock_wrlock(&lock);
   update_netifs(NULL);
+  // pthread_rwlock_unlock(&lock);
+
   if ((flags & AVAHI_LOOKUP_RESULT_LOCAL) || !strcasecmp(ifname, "lo") ||
       is_local_hostname(host_name)) {
+    // pthread_rwlock_wrlock(&lock);
     update_local_printers ();
+    // pthread_rwlock_unlock(&lock);
+
     uuid_value = NULL;
     if (txt && (uuid_entry = avahi_string_list_find(txt, "UUID")))
       avahi_string_list_get_pair(uuid_entry, &uuid_key, &uuid_value, NULL);
@@ -9853,7 +9891,7 @@ static void resolve_callback(AvahiServiceResolver *r,
   }
 
   /* Called whenever a service has been resolved successfully or timed out */
-
+  // pthread_rwlock_wrlock(&lock);
   switch (event) {
 
   /* Resolver error */
@@ -10049,10 +10087,74 @@ static void resolve_callback(AvahiServiceResolver *r,
   }
 
  ignore:
-  avahi_service_resolver_free(r);
-
+  avahi_service_resolver_free(a->r);
+  free((char*)a->name);
+  free((char*)a->type);
+  free((char*)a->domain);
+  free((char*)a->host_name);
+  free(a->txt);
+  free((AvahiAddress*)a->address);
+  free(a);
   if (in_shutdown == 0)
     recheck_timer ();
+
+  pthread_rwlock_unlock(&lock);
+  
+}
+
+void resolver_wrapper(AvahiServiceResolver *r,
+           AvahiIfIndex interface,
+           AvahiProtocol protocol,
+           AvahiResolverEvent event,
+           const char *name,
+           const char *type,
+           const char *domain,
+           const char *host_name,
+           const AvahiAddress *address,
+           uint16_t port,
+           AvahiStringList *txt,
+           AvahiLookupResultFlags flags,
+           AVAHI_GCC_UNUSED void* userdata){
+
+  debug_printf("resolver_wrapper() in THREAD %ld\n", pthread_self());
+  
+  resolver_args_t *arg = (resolver_args_t*)malloc(sizeof(resolver_args_t));
+  
+  AvahiStringList* temp_txt = (AvahiStringList*)malloc(sizeof(AvahiStringList));
+  AvahiAddress* temp_addr = (AvahiAddress*)malloc(sizeof(AvahiAddress));
+  
+  char* temp_name = (char*)malloc(strlen(name)+1);
+  char* temp_type = (char*)malloc(strlen(type)+1);
+  char* temp_domain = (char*)malloc(strlen(domain)+1);
+  char* temp_host_name = (char*)malloc(strlen(host_name)+1);
+
+  temp_txt = avahi_string_list_copy(txt);
+  
+  temp_addr->proto = address->proto;
+  temp_addr->data = address->data;
+  
+  strcpy(temp_name, name);
+  strcpy(temp_type, type);
+  strcpy(temp_domain, domain);
+  strcpy(temp_host_name, host_name);
+
+  arg->r = r;
+  arg->interface = interface;
+  arg->protocol = protocol;
+  arg->event = event;
+  arg->name = temp_name;
+  arg->type = temp_type;
+  arg->domain = temp_domain;
+  arg->host_name = temp_host_name;
+  arg->address = temp_addr;
+  arg->port = port;
+  arg->txt = temp_txt;
+  arg->flags = flags;
+  arg->userdata = userdata;
+
+  pthread_t id;
+  pthread_create(&id, NULL, (void*)resolve_callback, (void*)arg);
+
 }
 
 static void browse_callback(AvahiServiceBrowser *b,
@@ -10116,7 +10218,7 @@ static void browse_callback(AvahiServiceBrowser *b,
        the callback function is called the server will free
        the resolver for us. */
 
-    if (!(avahi_service_resolver_new(c, interface, protocol, name, type, domain, AVAHI_PROTO_UNSPEC, 0, resolve_callback, c)))
+    if (!(avahi_service_resolver_new(c, interface, protocol, name, type, domain, AVAHI_PROTO_UNSPEC, 0, resolver_wrapper, c)))
       debug_printf("Failed to resolve service '%s': %s\n",
 		   name, avahi_strerror(avahi_client_errno(c)));
     break;
