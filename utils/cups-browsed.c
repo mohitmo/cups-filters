@@ -10126,7 +10126,8 @@ void resolver_wrapper(AvahiServiceResolver *r,
   char* temp_name = (char*)malloc(strlen(name)+1);
   char* temp_type = (char*)malloc(strlen(type)+1);
   char* temp_domain = (char*)malloc(strlen(domain)+1);
-  char* temp_host_name = (char*)malloc(strlen(host_name)+1);
+  char* temp_host_name = NULL;
+  if(host_name) temp_host_name = (char*)malloc(strlen(host_name)+1);
 
   temp_txt = avahi_string_list_copy(txt);
   
@@ -10136,7 +10137,7 @@ void resolver_wrapper(AvahiServiceResolver *r,
   strcpy(temp_name, name);
   strcpy(temp_type, type);
   strcpy(temp_domain, domain);
-  strcpy(temp_host_name, host_name);
+  if(host_name) strcpy(temp_host_name, host_name);
 
   arg->r = r;
   arg->interface = interface;
