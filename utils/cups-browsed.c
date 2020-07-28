@@ -7482,7 +7482,6 @@ remove_printer_entry(remote_printer_t *p) {
     p->status = STATUS_DISAPPEARED;
   p->timeout = time(NULL) + TIMEOUT_REMOVE;
 }
-
 gboolean update_cups_queues(gpointer unused) {
   pthread_rwlock_wrlock(&lock);
   remote_printer_t *p, *q, *r, *s, *master;
@@ -10091,7 +10090,7 @@ static void resolve_callback(void* arg) {
   free((char*)a->name);
   free((char*)a->type);
   free((char*)a->domain);
-  free((char*)a->host_name);
+  if(a->host_name) free((char*)a->host_name);
   free(a->txt);
   free((AvahiAddress*)a->address);
   free(a);
@@ -10119,10 +10118,8 @@ void resolver_wrapper(AvahiServiceResolver *r,
   debug_printf("resolver_wrapper() in THREAD %ld\n", pthread_self());
   
   resolver_args_t *arg = (resolver_args_t*)malloc(sizeof(resolver_args_t));
-  
   AvahiStringList* temp_txt = (AvahiStringList*)malloc(sizeof(AvahiStringList));
   AvahiAddress* temp_addr = (AvahiAddress*)malloc(sizeof(AvahiAddress));
-  
   char* temp_name = (char*)malloc(strlen(name)+1);
   char* temp_type = (char*)malloc(strlen(type)+1);
   char* temp_domain = (char*)malloc(strlen(domain)+1);
@@ -10131,8 +10128,10 @@ void resolver_wrapper(AvahiServiceResolver *r,
 
   temp_txt = avahi_string_list_copy(txt);
   
-  temp_addr->proto = address->proto;
-  temp_addr->data = address->data;
+  if(address){
+    temp_addr->proto = address->proto;
+    temp_addr->data = address->data;
+  }
   
   strcpy(temp_name, name);
   strcpy(temp_type, type);
@@ -10154,8 +10153,34 @@ void resolver_wrapper(AvahiServiceResolver *r,
   arg->userdata = userdata;
 
   pthread_t id;
-  pthread_create(&id, NULL, (void*)resolve_callback, (void*)arg);
+  int err;
+  
+  if((err = pthread_create(&id, NULL, (void*)resolve_callback, (void*)arg))){
+    debug_printf("Unable to create a new thread, retrying!\n");
+    
+    int attempts = 0;
+    while(attempts<5){
+      if((err = pthread_create(&id, NULL, (void*)resolve_callback, (void*)arg)))
+        debug_printf("Unable to create a new thread, retrying!\n");
+      else break;
+      
+      attempts++;
+    }
+    if(attempts == 5){
+      debug_printf("Could not create new thread even after many attempts, ignoring this entry.\n");
+      avahi_service_resolver_free(arg->r);
+      free((char*)arg->name);
+      free((char*)arg->type);
+      free((char*)arg->domain);
+      if(arg->host_name) free((char*)arg->host_name);
+      free(arg->txt);
+      free((AvahiAddress*)arg->address);
+      free(arg);
+      return;
+    }
+  }
 
+  pthread_detach(id);
 }
 
 static void browse_callback(AvahiServiceBrowser *b,
