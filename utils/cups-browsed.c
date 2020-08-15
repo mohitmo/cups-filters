@@ -8571,7 +8571,7 @@ pthread_rwlock_t update_lock = PTHREAD_RWLOCK_INITIALIZER;
 
 gboolean update_cups_queues(gpointer unused) {
   debug_printf("update_cups_queues() in THREAD %ld\n", pthread_self);
-  pthread_rwlock_wrlock(&lock);
+  pthread_rwlock_wrlock(&update_lock);
   update_count++;
   remote_printer_t *p, *q, *r, *s, *master;
   http_t        *http;
@@ -8928,7 +8928,7 @@ gboolean update_cups_queues(gpointer unused) {
     remove_printer_entry(p);
 
   log_all_printers();
-  pthread_rwlock_unlock(&lock);
+  pthread_rwlock_unlock(&update_lock);
 
   if (in_shutdown == 0)
     recheck_timer ();
@@ -10351,7 +10351,7 @@ void resolver_wrapper(AvahiServiceResolver *r,
       return;
     }
   }
-  pthread_detach(id, NULL);
+  pthread_detach(id);
   // resolve_callback((void*)arg);
   
 }
