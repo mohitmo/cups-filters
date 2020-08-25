@@ -532,6 +532,9 @@ static int timeout_reached = 0;
 pthread_rwlock_t lock = PTHREAD_RWLOCK_INITIALIZER;
 pthread_rwlock_t loglock = PTHREAD_RWLOCK_INITIALIZER;
 
+pthread_rwlock_t resolvelock = PTHREAD_RWLOCK_INITIALIZER;
+pthread_rwlock_t netiflock = PTHREAD_RWLOCK_INITIALIZER;
+
 
 static void recheck_timer (void);
 static void browse_poll_create_subscription (browsepoll_t *context,
@@ -728,7 +731,7 @@ debug_printf(const char *format, ...) {
     if (debug_stderr) {
       va_start(arglist, format);
       fprintf(stderr, "%s ", buf);
-      // fprintf(stderr, "%ld ", pthread_self());
+      fprintf(stderr, "%ld ", pthread_self());
       vfprintf(stderr, format, arglist);
       fflush(stderr);
       va_end(arglist);
@@ -736,7 +739,7 @@ debug_printf(const char *format, ...) {
     if (debug_logfile && lfp) {
       va_start(arglist, format);
       fprintf(lfp, "%s ", buf);
-      // fprintf(lfp, "%ld ", pthread_self());
+      fprintf(lfp, "%ld ", pthread_self());
       vfprintf(lfp, format, arglist);
       fflush(lfp);
       va_end(arglist);
@@ -2854,6 +2857,8 @@ void get_cluster_default_attributes(ipp_t** merged_attributes,
                                     char* default_pagesize,
                                     const char **default_color)
 {
+    debug_printf("function is getting called!!!!");
+
   int                     max_pages_per_min = 0, pages_per_min;
   remote_printer_t        *p, *def_printer = NULL;
   int                     i, count;
@@ -3708,8 +3713,7 @@ get_printer_uuid(http_t *http_printer,
 static void
 get_local_printers (void)
 {
-  // int locked = 0;
-  // if(!pthread_rwlock_trywrlock(&lock)){
+
   pthread_rwlock_wrlock(&lock);
 
   dest_list_t dest_list = {0, NULL};
@@ -5743,7 +5747,9 @@ get_local_queue_name(const char *service_name,
      this is also taken, ignore the printer */
 
   /* Get available CUPS queues */
+  // pthread_rwlock_unlock(&lock);
   update_local_printers ();
+  // pthread_rwlock_wrlock(&lock);
 
   /* We skip trying to use the queue name purely derived from the
      remote CUPS queue name or make and model for remote CUPS queues
@@ -6718,14 +6724,19 @@ on_printer_modified (CupsNotifier *object,
 
   debug_printf("[CUPS Notification] Printer modified: %s\n",
 	       text);
-
+  pthread_rwlock_wrlock(&(lock));
   if (is_created_by_cups_browsed(printer)) {
     p = printer_record(printer);
+
+    // if(!p) return;
+
     if (p->overwritten)
       /* We already have discovered that this queue got overwritten
          and are treating the process appropriately, so return now to
          avoid an infinite recursion */
-      return;
+      goto end;
+    
+    
 
     if (queue_overwritten(p)) {
       /* Our generated local queue pointing to a remote printer got
@@ -6836,7 +6847,8 @@ on_printer_modified (CupsNotifier *object,
     } else {
       if (terminating) {
 	debug_printf("[CUPS Notification]: Not saving external option changes because cups-browsed is terminating.\n");
-	return;
+	// pthread_rwlock_unlock(&(lock));
+  goto end;
       }
       /* The user has changed settings of a printer which we have generated,
 	 backup the changes for the case of a crash or unclean shutdown of
@@ -6849,7 +6861,13 @@ on_printer_modified (CupsNotifier *object,
 	p->no_autosave = 0;
       }
     }
+    // pthread_rwlock_unlock(&(lock));
   }
+
+    // if(p)
+  end:
+  pthread_rwlock_unlock(&lock); 
+
 }
 
 
@@ -6997,12 +7015,6 @@ create_remote_printer_entry (const char *queue_name,
   memset(p, 0, sizeof(remote_printer_t));
   
   /* Queue name */
-  // {p->printer_lock = PTHREAD_RWLOCK_INITIALIZER;}
-  // if(pthread_rwlock_init(&(p->printer_lock), NULL)){
-  //   fprintf(stderr, "ERROR HAPPENED\n");
-  // }
-  // else fprintf(stderr, "LOCK Initialized\n");
-
   p->called = 0;
 
   p->queue_name = strdup(queue_name);
@@ -7070,9 +7082,10 @@ create_remote_printer_entry (const char *queue_name,
     return NULL;
   }
   if (domain != NULL && domain[0] != '\0' &&
-      type != NULL && type[0] != '\0')
+      type != NULL && type[0] != '\0'){
     ipp_discoveries_add(p->ipp_discoveries, interface, type, family);
 
+  }
   /* Schedule for immediate creation of the CUPS queue */
   p->status = STATUS_TO_BE_CREATED;
   p->timeout = time(NULL) + TIMEOUT_IMMEDIATELY;
@@ -7511,25 +7524,28 @@ int cups_queues_updated = 0;
 
 void create_queue(void* arg){
 
-  debug_printf("create_queue() in THREAD %ld\n", pthread_self());
 
   create_args_t* a = (create_args_t*)arg;
   remote_printer_t *p, *q, *r, *s, *master;
-
+    debug_printf("create_queue() in THREAD %ld\n", pthread_self());
+  
+  
   pthread_rwlock_wrlock(&lock);
+
   for (p = (remote_printer_t *)cupsArrayFirst(remote_printers);
        p; p = (remote_printer_t *)cupsArrayNext(remote_printers)){
-    if(!strcmp(p->queue_name, a->queue) && !strcmp(p->uri, a->uri) && p->status == STATUS_TO_BE_CREATED){
+    if(!strcmp(p->queue_name, a->queue) && p->status == STATUS_TO_BE_CREATED){
       break;
     }
   }
+
+  pthread_rwlock_unlock(&lock);
+
   if(!p || (p && p->status!=STATUS_TO_BE_CREATED)){
-    // fprintf(stderr, "YAHA HAI %s\n", p->queue_name);
-    pthread_rwlock_unlock(&lock);
     return;
   }
   
-  // pthread_rwlock_unlock(&lock);
+  pthread_rwlock_wrlock(&(lock));
   
   
 
@@ -7799,8 +7815,6 @@ process */
       } else
   debug_printf("Creating permanent CUPS queue %s.\n",
          p->queue_name);
-
-  if(p->status == STATUS_TO_BE_CREATED) fprintf(stderr, "GALTA HAI\n");
 
       /* If we did not already obtain a PPD file from the temporary CUPS queue
          or if we want to use a System V interface script for our IPP network
@@ -8562,7 +8576,12 @@ process */
       p->no_autosave = 0;
 
   end:
-  pthread_rwlock_unlock(&lock);
+  p->called = 0;
+  pthread_rwlock_unlock(&(lock));
+  free(a->uri);
+  free(a->queue);
+  free(a);
+  
   return;
 
 }
@@ -8570,8 +8589,10 @@ static int update_count = 0;
 pthread_rwlock_t update_lock = PTHREAD_RWLOCK_INITIALIZER;
 
 gboolean update_cups_queues(gpointer unused) {
+  
   debug_printf("update_cups_queues() in THREAD %ld\n", pthread_self);
   pthread_rwlock_wrlock(&update_lock);
+
   update_count++;
   remote_printer_t *p, *q, *r, *s, *master;
   http_t        *http;
@@ -8866,28 +8887,21 @@ gboolean update_cups_queues(gpointer unused) {
     /* (...or, we've just received a CUPS Browsing packet for this queue) */
     case STATUS_TO_BE_CREATED:
       {
-        // if(p->called){
-        //   fprintf(stderr, "already done %s\n", p->queue_name);
-        //   break;
-        // }
+        if(p->called) break;
+        
         create_args_t* tp = (create_args_t*)malloc(sizeof(create_args_t));
-        char* queue = (char*)malloc(strlen(p->queue_name)+1);
-        char* uri_t = (char*)malloc(strlen(p->uri)+1);
-        strcpy(queue, p->queue_name);
-        strcpy(uri_t, p->uri);
-
-        tp->queue = queue;
-        tp->uri = uri_t;
+        tp->queue = strdup(p->queue_name);
+        tp->uri = strdup(p->uri);
+        
 
         pthread_t id;
-        pthread_create(&id, NULL, create_queue, (void*)tp);
-        // pthread_rwlock_unlock(&lock);
-        // create_queue((void*)tp);
-        // pthread_rwlock_wrlock(&lock);
         p->called = 1;
+        
+        pthread_create(&id, NULL, create_queue, (void*)tp);
+        
 
       }
-      // p->status = STATUS_CONFIRMED;
+      
       break;
       
     case STATUS_CONFIRMED:
@@ -8952,7 +8966,7 @@ recheck_timer (void)
   for (p = (remote_printer_t *)cupsArrayFirst(remote_printers);
        p;
        p = (remote_printer_t *)cupsArrayNext(remote_printers)){
-    // if(p->called) continue;
+    if(p->called) continue;
     if (p->timeout == (time_t) -1)
       continue;
     else if (now > p->timeout) {
@@ -9121,6 +9135,7 @@ matched_filters (const char *queue_name,
 static gboolean
 update_netifs (gpointer data)
 {
+  pthread_rwlock_wrlock(&netiflock);
   struct ifaddrs *ifaddr, *ifa;
   netif_t *iface, *iface2;
   int i, add_to_netifs, addr_size, dupe, if_found, addr_found;
@@ -9132,6 +9147,7 @@ update_netifs (gpointer data)
   if (getifaddrs (&ifaddr) == -1) {
     debug_printf("unable to get interface addresses: %s\n",
 		 strerror (errno));
+    pthread_rwlock_unlock(&netiflock);
     return FALSE;
   }
 
@@ -9344,6 +9360,7 @@ update_netifs (gpointer data)
   debug_printf("%s\n", list);
 
   freeifaddrs (ifaddr);
+  pthread_rwlock_unlock(&netiflock);
 
   /* If run as a timeout, don't run it again. */
   return FALSE;
@@ -9419,7 +9436,7 @@ examine_discovered_printer_record(const char *host,
      this printer */
   if (OnlyUnsupportedByCUPS) {
     //lock
-    pthread_rwlock_wrlock(&lock);
+    // pthread_rwlock_wrlock(&lock);
     if (g_hash_table_find (cups_supported_remote_printers,
 			   local_printer_service_name_matches,
 			   (gpointer *)service_name)) {
@@ -9428,10 +9445,10 @@ examine_discovered_printer_record(const char *host,
       debug_printf("Printer with DNS-SD service name \"%s\" does not need to be covered by us as it is already supported by CUPS, skipping.\n",
 		   service_name);
       //unlock
-      pthread_rwlock_unlock(&lock);
+      // pthread_rwlock_unlock(&lock);
       goto fail;
     }
-    pthread_rwlock_unlock(&lock);
+    // pthread_rwlock_unlock(&lock);
     //unlock
   }
 
@@ -9590,8 +9607,10 @@ examine_discovered_printer_record(const char *host,
 		     (ip != NULL ? ip : host), port, "/%s", resource);
 
   /* Determine the queue name */
+  pthread_rwlock_unlock(&lock);
   local_queue_name = get_local_queue_name(service_name, make_model, resource,
 					  remote_host, &is_cups_queue, NULL);
+  pthread_rwlock_wrlock(&lock);
   if (local_queue_name == NULL)
     goto fail;
 
@@ -9609,14 +9628,14 @@ examine_discovered_printer_record(const char *host,
      event handler function. */
   if (type == NULL || type[0] == '\0'){
     //lock
-    pthread_rwlock_wrlock(&lock);
+    // pthread_rwlock_wrlock(&lock);
     update_netifs(NULL);
-    pthread_rwlock_unlock(&lock);
+    // pthread_rwlock_unlock(&lock);
     //unlock
   }
 
   //lock
-  pthread_rwlock_wrlock(&lock);
+  // pthread_rwlock_wrlock(&lock);
   /* Check if we have already created a queue for the discovered
      printer */
   for (p = (remote_printer_t *)cupsArrayFirst(remote_printers);
@@ -9644,6 +9663,7 @@ examine_discovered_printer_record(const char *host,
        would get, so ignore this remote printer */
     debug_printf("Printer with URI %s (or IPP/IPPS equivalent) already exists, printer ignored.\n",
 		 uri);
+    // pthread_rwlock_unlock(&lock);
     goto fail;
   }
 
@@ -9845,8 +9865,9 @@ examine_discovered_printer_record(const char *host,
 				     domain, interface, family, pdl, color,
 				     duplex, make_model, is_cups_queue);
   }
-  //unlock
-  pthread_rwlock_unlock(&lock);
+ 
+ // pthread_rwlock_unlock(&lock); 
+ 
  fail:
   free (remote_host);
   free (pdl);
@@ -10013,15 +10034,18 @@ static void resolve_callback(void* arg) {
   /* Ignore local queues of the cupsd we are serving for, identifying them
      via UUID */
   
-  pthread_rwlock_wrlock(&lock);
+  // while(pthread_rwlock_trywrlock(&lock)){
+  //   fprintf(stderr, "CANNOT ACCESS LOCK %s\n", name);
+  // }
+  pthread_rwlock_wrlock(&resolvelock);
   update_netifs(NULL);
   // pthread_rwlock_unlock(&lock);
 
   if ((flags & AVAHI_LOOKUP_RESULT_LOCAL) || !strcasecmp(ifname, "lo") ||
       is_local_hostname(host_name)) {
-    pthread_rwlock_unlock(&lock);
+    // pthread_rwlock_unlock(&lock);
     update_local_printers ();
-    pthread_rwlock_wrlock(&lock);
+    // pthread_rwlock_wrlock(&lock);
 
     uuid_value = NULL;
     if (txt && (uuid_entry = avahi_string_list_find(txt, "UUID")))
@@ -10190,22 +10214,22 @@ static void resolve_callback(void* arg) {
 	      !host_name) {
 	    debug_printf("Avahi Resolver: Service '%s' of type '%s' in domain '%s' with IP address %s.\n",
 			 name, type, domain, addrstr);
-      pthread_rwlock_unlock(&lock);
+      pthread_rwlock_wrlock(&lock);
 	    examine_discovered_printer_record((strcasecmp(ifname, "lo") ?
 					       host_name : "localhost"),
 					      addrstr, port, rp_value, name,
 					      "", instance, type, domain,
 					      ifname, addr->sa_family, txt);
-      pthread_rwlock_wrlock(&lock);
-	  } else{
       pthread_rwlock_unlock(&lock);
+	  } else{
+      pthread_rwlock_wrlock(&lock);
 	    examine_discovered_printer_record((strcasecmp(ifname, "lo") ?
 					       host_name : "localhost"),
 					      NULL, port, rp_value,
 					      name, "", instance, type,
 					      domain, ifname, addr->sa_family,
 					      txt);
-      pthread_rwlock_wrlock(&lock);
+      pthread_rwlock_unlock(&lock);
     }
 	} else
 	  debug_printf("Avahi Resolver: Service '%s' of type '%s' in domain '%s' skipped, could not determine IP address.\n",
@@ -10215,7 +10239,7 @@ static void resolve_callback(void* arg) {
 	/* Check remote printer type and create appropriate local queue to
 	   point to it */
 	if (host_name){
-    pthread_rwlock_unlock(&lock);
+    pthread_rwlock_wrlock(&lock);
 	  examine_discovered_printer_record((strcasecmp(ifname, "lo") ?
 					     host_name : "localhost"),
 					    NULL, port, rp_value,
@@ -10227,7 +10251,7 @@ static void resolve_callback(void* arg) {
 					      AVAHI_PROTO_INET6 ? AF_INET6 :
 					      0)),
 					    txt);
-    pthread_rwlock_wrlock(&lock);
+    pthread_rwlock_unlock(&lock);
   }
 	else
 	  debug_printf("Avahi Resolver: Service '%s' of type '%s' in domain '%s' skipped, host name not supplied.\n",
@@ -10258,18 +10282,20 @@ static void resolve_callback(void* arg) {
   }
 
  ignore:
-  avahi_service_resolver_free(a->r);
-  free((char*)a->name);
-  free((char*)a->type);
-  free((char*)a->domain);
+  if(a->r) avahi_service_resolver_free(a->r);
+  if(a->name) free((char*)a->name);
+  if(a->type) free((char*)a->type);
+  if(a->domain) free((char*)a->domain);
   if(a->host_name) free((char*)a->host_name);
-  free(a->txt);
-  free((AvahiAddress*)a->address);
+  if(a->txt) free(a->txt);
+  if(a->address) free((AvahiAddress*)a->address);
   free(a);
+  pthread_rwlock_unlock(&resolvelock);
+
   if (in_shutdown == 0)
     recheck_timer ();
 
-  pthread_rwlock_unlock(&lock);
+  
   
 }
 
@@ -10292,12 +10318,7 @@ void resolver_wrapper(AvahiServiceResolver *r,
   resolver_args_t *arg = (resolver_args_t*)malloc(sizeof(resolver_args_t));
   AvahiStringList* temp_txt = (AvahiStringList*)malloc(sizeof(AvahiStringList));
   AvahiAddress* temp_addr = (AvahiAddress*)malloc(sizeof(AvahiAddress));
-  char* temp_name = (char*)malloc(strlen(name)+1);
-  char* temp_type = (char*)malloc(strlen(type)+1);
-  char* temp_domain = (char*)malloc(strlen(domain)+1);
-  char* temp_host_name = NULL;
-  if(host_name) temp_host_name = (char*)malloc(strlen(host_name)+1);
-
+  
   temp_txt = avahi_string_list_copy(txt);
   
   if(address){
@@ -10305,19 +10326,15 @@ void resolver_wrapper(AvahiServiceResolver *r,
     temp_addr->data = address->data;
   }
   
-  strcpy(temp_name, name);
-  strcpy(temp_type, type);
-  strcpy(temp_domain, domain);
-  if(host_name) strcpy(temp_host_name, host_name);
-
   arg->r = r;
   arg->interface = interface;
   arg->protocol = protocol;
   arg->event = event;
-  arg->name = temp_name;
-  arg->type = temp_type;
-  arg->domain = temp_domain;
-  arg->host_name = temp_host_name;
+  arg->name = strdup(name);
+  arg->type = strdup(type);
+  arg->domain = strdup(domain);
+  if(host_name) arg->host_name = strdup(host_name);
+  else arg->host_name = NULL;
   arg->address = temp_addr;
   arg->port = port;
   arg->txt = temp_txt;
@@ -10326,7 +10343,7 @@ void resolver_wrapper(AvahiServiceResolver *r,
 
   pthread_t id;
   int err;
-  // resolve_callback((void*)arg);
+  
   if((err = pthread_create(&id, NULL, (void*)resolve_callback, (void*)arg))){
     debug_printf("Unable to create a new thread, retrying!\n");
     
@@ -10352,7 +10369,6 @@ void resolver_wrapper(AvahiServiceResolver *r,
     }
   }
   pthread_detach(id);
-  // resolve_callback((void*)arg);
   
 }
 
