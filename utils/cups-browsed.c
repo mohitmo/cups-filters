@@ -7659,7 +7659,7 @@ void create_queue(void* arg){
 
 
   create_args_t* a = (create_args_t*)arg;
-  remote_printer_t *p, *q, *r, *s, *master;
+  remote_printer_t *p, *r, *s, *master;
     debug_printf("create_queue() in THREAD %ld\n", pthread_self());
   
   
@@ -8772,52 +8772,14 @@ gboolean update_cups_queues(gpointer unused) {
   pthread_rwlock_wrlock(&update_lock);
 
   update_count++;
-  remote_printer_t *p, *q, *r, *s, *master;
+  remote_printer_t *p, *q;
   http_t        *http;
-  char          uri[HTTP_MAX_URI], device_uri[HTTP_MAX_URI], buf[1024],
-                line[1024];
-  int           num_options;
-  cups_option_t *options;
+  char          uri[HTTP_MAX_URI];
   int           num_jobs;
   cups_job_t    *jobs;
   ipp_t         *request;
   time_t        current_time;
-  int           i, ap_remote_queue_id_line_inserted,
-                want_raw, num_cluster_printers = 0;
-  char          *disabled_str, *ptr;
-  char          *ppdfile, *ifscript;
-  int           fd = 0;  /* Script file descriptor */
-  char          tempfile[1024];  /* Temporary file */
-  char          buffer[8192];  /* Buffer for creating script */
-  int           bytes;
-  const char    *cups_serverbin;  /* CUPS_SERVERBIN environment variable */
-#ifdef HAVE_CUPS_1_6
-  ipp_attribute_t *attr;
-  int           count, left, right, bottom, top;
-  const char    *default_page_size = NULL, *best_color_space = NULL,
-                *color_space;
-#endif
-  const char    *loadedppd = NULL;
-  ppd_file_t    *ppd = NULL;
-  ppd_choice_t  *choice;
-  cups_file_t   *in, *out;
-  char          keyword[1024], *keyptr;
-  const char    *customval;
-  const char    *val = NULL;
-  cups_dest_t   *dest = NULL;
-  int           is_shared;
-  cups_array_t  *conflicts = NULL;
-  ipp_t         *printer_attributes = NULL;
-  cups_array_t  *sizes=NULL;
-  ipp_t         *printer_ipp_response; 
-  char    *make_model;
-  const char    *pdl=NULL;
-  int           color;
-  int           duplex;
-  char          *default_pagesize;
-  const char    *default_color = NULL;
-  int           cups_queues_updated = 0;
-  cups_queues_updated = 0;
+  
   /* Create dummy entry to point slaves at when their master is about to
      get removed now (if we point them to NULL, we would try to remove
      the already removed CUPS queue again when it comes to the removal
@@ -9067,17 +9029,34 @@ gboolean update_cups_queues(gpointer unused) {
       {
         if(p->called) break;
         
-        create_args_t* tp = (create_args_t*)malloc(sizeof(create_args_t));
-        tp->queue = strdup(p->queue_name);
-        tp->uri = strdup(p->uri);
+        create_args_t* arg = (create_args_t*)malloc(sizeof(create_args_t));
+        arg->queue = strdup(p->queue_name);
+        arg->uri = strdup(p->uri);
         
 
         pthread_t id;
         p->called = 1;
-        
-        pthread_create(&id, NULL, create_queue, (void*)tp);
-        
-      }
+        int err = 0;
+        if((err = pthread_create(&id, NULL, (void*)create_queue, (void*)arg))){
+					debug_printf("Unable to create a new thread, retrying!\n");
+
+					int attempts = 0;
+					while(attempts<5){
+					  if((err = pthread_create(&id, NULL, (void*)create_queue, (void*)arg)))
+					    debug_printf("Unable to create a new thread, retrying!\n");
+					  else break;
+					  attempts++;
+					}
+					if(attempts == 5){
+						debug_printf("Could not create new thread even after many attempts for queue %s\n", p->queue_name);
+						free(arg);
+						p->called = 0;
+					  break;
+					}
+				}
+  			pthread_detach(id);
+
+  		}
       
       break;
       
@@ -10177,7 +10156,6 @@ static void resolve_callback(void* arg) {
 
   AvahiServiceResolver *r = a->r;
   AvahiIfIndex interface = a->interface;
-  AvahiProtocol protocol = a->protocol;
   AvahiResolverEvent event = a->event;
   const char *name = a->name;
   const char *type = a->type;
@@ -10534,14 +10512,14 @@ void resolver_wrapper(AvahiServiceResolver *r,
     }
     if(attempts == 5){
       debug_printf("Could not create new thread even after many attempts, ignoring this entry.\n");
-      avahi_service_resolver_free(arg->r);
-      free((char*)arg->name);
-      free((char*)arg->type);
-      free((char*)arg->domain);
-      if(arg->host_name) free((char*)arg->host_name);
-      free(arg->txt);
-      free((AvahiAddress*)arg->address);
-      free(arg);
+      if(arg->r) avahi_service_resolver_free(arg->r);
+			if(arg->name) free((char*)arg->name);
+			if(arg->type) free((char*)arg->type);
+			if(arg->domain) free((char*)arg->domain);
+			if(arg->host_name) free((char*)arg->host_name);
+			if(arg->txt) free(arg->txt);
+			if(arg->address) free((AvahiAddress*)arg->address);
+			free(arg);
       return;
     }
   }
